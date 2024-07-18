@@ -44,10 +44,10 @@ private:
 
 
     IPAddress _hostIP;
-    char _host[128];
+    char _host[256];
     int _port;
 
-    int _sockedfd = -1;
+    int _sockfd = -1;
     int _peek = -1;
     mbedtls_net_context server_fd;
     mbedtls_entropy_context entropy;
