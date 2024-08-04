@@ -1,3 +1,8 @@
+
+
+
+#ifdef TLSCLIENT_DEV
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <TLSClient.h>
@@ -62,3 +67,6 @@ void loop()
 
 
 }
+
+
+#endif

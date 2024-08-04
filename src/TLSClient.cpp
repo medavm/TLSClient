@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
+#include <mbedtls/debug.h>
 
 
 static int _print_error(int err, const char * function, int line)
@@ -164,6 +165,21 @@ int TLSClient::connect(const char *host, uint16_t port)
     return connect(srv, port);
 }
 
+// void my_debug(void *ctx, int level, const char *file, int line, const char *str)
+// {
+//     const char *p, *basename;
+//     (void) ctx;
+
+//     /* Extract basename from file */
+//     for(p = basename = file; *p != '\0'; p++) {
+//         if(*p == '/' || *p == '\\') {
+//             basename = p + 1;
+//         }
+//     }
+
+//     mbedtls_printf("%s:%04d: |%d| %s", basename, line, level, str);
+// }
+
 int TLSClient::connect(IPAddress ip, uint16_t port)
 {
     if(_sockfd > -1)
@@ -190,6 +206,10 @@ int TLSClient::connect(IPAddress ip, uint16_t port)
     mbedtls_ssl_config_init( &conf );
     mbedtls_ctr_drbg_init( &ctr_drbg );
 
+    
+	// mbedtls_ssl_conf_dbg(&conf, my_debug, NULL);
+    // mbedtls_debug_set_threshold(5);
+
     int res = 0;
     const char* pers = "esp32_tls";
     mbedtls_entropy_init( &entropy );
@@ -206,15 +226,15 @@ int TLSClient::connect(IPAddress ip, uint16_t port)
         stop();
         return 0;
     }
-    _sockfd = res;
+    int sockfd = res;
     server_fd.fd = res;
 
-    log_d("fd %d socket connected %dms", _sockfd, millis()-start);
+    log_d("fd %d socket connected %dms", sockfd, millis()-start);
 
     if( ( res = mbedtls_ssl_config_defaults( &conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT ) ) != 0 )
     {
         print_error(res);
-        log_e( "fd %d mbedtls_ssl_config_defaults() failed %d", _sockfd, res);
+        log_e( "fd %d mbedtls_ssl_config_defaults() failed %d", sockfd, res);
         stop();
         return 0;
     }
@@ -226,7 +246,7 @@ int TLSClient::connect(IPAddress ip, uint16_t port)
     if( ( res = mbedtls_ssl_set_hostname( &ssl, _host )) != 0 )
     {
         print_error(res);
-        log_e( "fd %d mbedtls_ssl_set_hostname() failed %d", _sockfd, res);
+        log_e( "fd %d mbedtls_ssl_set_hostname() failed %d", sockfd, res);
         stop();
         return 0;
     }
@@ -234,27 +254,27 @@ int TLSClient::connect(IPAddress ip, uint16_t port)
     if ((res = mbedtls_ssl_setup(&ssl, &conf)) != 0) 
     {
         print_error(res);
-        log_e( "fd %d mbedtls_ssl_setup() failed %d", _sockfd, res);
+        log_e( "fd %d mbedtls_ssl_setup() failed %d", sockfd, res);
         stop();
         return 0;
     }
 
     mbedtls_ssl_set_bio(&ssl, &server_fd.fd, mbedtls_net_send, mbedtls_net_recv, NULL );
 
-    log_d("fd %d performing handshake", _sockfd);
+    log_d("fd %d performing handshake", sockfd);
     while ((res = mbedtls_ssl_handshake(&ssl)) != 0) 
     {
         if (res != MBEDTLS_ERR_SSL_WANT_READ && res != MBEDTLS_ERR_SSL_WANT_WRITE) 
         {
             print_error(res);
-            log_e( "fd %d mbedtls_ssl_handshake() failed %d", _sockfd, res);
+            log_e( "fd %d mbedtls_ssl_handshake() failed %d", sockfd, res);
             stop();
             return 0;
         }
 
         if( millis()-start > _timeout)
         {
-            log_e("fd %d mbedtls_ssl_handshake() timeout", _sockfd);
+            log_e("fd %d mbedtls_ssl_handshake() timeout", sockfd);
             stop();
             return 0;
         }
@@ -262,8 +282,9 @@ int TLSClient::connect(IPAddress ip, uint16_t port)
         vTaskDelay(2); //
     }
 
+    _sockfd = sockfd;
     _peek = -1;
-    log_d("fd %d tls tunnel ready %dms", _sockfd, millis()-start);
+    log_d("fd %d tls tunnel ready %dms", sockfd, millis()-start);
 
     return 1;
 }
@@ -287,6 +308,7 @@ size_t TLSClient::write(const uint8_t *buf, size_t size)
     {
         if (res != MBEDTLS_ERR_SSL_WANT_READ && res != MBEDTLS_ERR_SSL_WANT_WRITE && res < 0) 
         {
+            print_error(res);
             log_e("fd %d mbedtls_ssl_write() failed %d", _sockfd, res); //
             stop();
             return -1;
@@ -424,16 +446,16 @@ void TLSClient::flush()
 void TLSClient::stop()
 {
     log_d("fd %d cleaning tls session", _sockfd);
+    if(_sockfd)
+        close(_sockfd);
     _sockfd = -1;
     _host[0] = '\0';
     _peek = -1;
-    close(server_fd.fd);
     mbedtls_net_free( &server_fd );
     mbedtls_ssl_free( &ssl );
     mbedtls_ssl_config_free( &conf );
     mbedtls_ctr_drbg_free( &ctr_drbg );
     mbedtls_entropy_free( &entropy );
-    
 }
 
 uint8_t TLSClient::connected()
