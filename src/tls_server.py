@@ -1,6 +1,6 @@
 
 
-import socket, ssl, time, sys
+import socket, ssl, time, os
 
 # context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
 
@@ -28,14 +28,22 @@ def test():
 			client, addr = sock.accept()
 			print("client connected", addr, flush=True)
 			conn = context.wrap_socket(client, server_side=True)
-			data = conn.recv()
-			while data:
-				print(data.decode(), flush=True)
-				data = conn.recv()
-
+			conn.settimeout(1)
+			while True:
+				try:
+					data = conn.recv()
+					if data:
+						print(data)
+					else:
+						break
+				except TimeoutError:
+					pass
+				except KeyboardInterrupt:
+					sock.close()
+					os._exit(0)
 		except KeyboardInterrupt:
 			sock.close()
-			sys.exit(00)
+			os._exit(0)
 
 
 test()

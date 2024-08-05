@@ -29,6 +29,7 @@ TLSClient::TLSClient()
 {
     setTimeout(TLSCLIENT_TIMEOUT_DEFAULT);
     _host[0] = '\0';
+    _status = TLSCLIENT_DISCONNECTED;
 }
 
 TLSClient::~TLSClient()
@@ -36,11 +37,52 @@ TLSClient::~TLSClient()
     stop();
 }
 
+int TLSClient::status()
+{
+    if(_status == TLSCLIENT_CONNECTING) //test if connected
+    {
+        int res = socketReady();
+        if(res > 0) 
+            _status = TLSCLIENT_CONNECTED;
+        else if(res < 0) //error
+            stop(); 
+    }
+
+    if(_status == TLSCLIENT_CONNECTED) //start handshake
+    {
+        int res = startHandshake();
+        if(res > 0)
+            _status = TLSCLIENT_HANDSHAKE_INPROGRESS;
+        else if(res < 0)
+            stop();
+    }
+
+    if(_status == TLSCLIENT_HANDSHAKE_INPROGRESS) //test if handshake complete
+    {
+        int res = handshakeComplete();
+        if(res > 0)
+            _status = TLSCLIENT_HANDSHAKE_COMPLETE;
+        else if(res < 0)
+            stop();
+    }
+
+    if(_status == TLSCLIENT_HANDSHAKE_COMPLETE) //test is still alive
+    {
+        int res = mbedtls_ssl_read(&ssl, NULL, 0);    
+        if (res < 0 && res != MBEDTLS_ERR_SSL_WANT_READ && res != MBEDTLS_ERR_SSL_WANT_WRITE) 
+        {
+            print_error(res);
+            log_e("fd %d mbedtls_ssl_read() failed %d", _sockfd, res);
+            stop();
+        }
+    }
+
+    return _status;
+}
+
+
 int TLSClient::socketReady()
 {
-
-    if(_sockfd < 0)
-        return -1;
 
     fd_set fdset;
     struct timeval tv;
@@ -77,140 +119,125 @@ int TLSClient::socketReady()
             log_e("fd %d socket errno: %d, \"%s\"", _sockfd, sockerr, strerror(sockerr));
             return -1;
         }
-    }
 
-    // log_d("fd %d select() %d socket ready?", _sockfd, res);
-    return 1;
+        log_d("fd %d select() %d socket connected %dms", _sockfd, res, millis()-_connstarted);
+        return 1;
+    }
 
 }
 
-int TLSClient::timedConnect(IPAddress ip, int port, int timeout)
+int TLSClient::startHandshake()
 {
-    uint32_t start = millis();
+    if(_status != TLSCLIENT_CONNECTED)
+        return -1;
 
-    _sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (_sockfd < 0) 
+    int res = 0;
+    if( ( res = mbedtls_ssl_config_defaults( &conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT ) ) != 0 )
     {
-        log_e("failed to create socket errno %d", errno);
+        print_error(res);
+        log_e( "fd %d mbedtls_ssl_config_defaults() failed %d", _sockfd, res);
         return -1;
     }
 
-    fcntl( _sockfd, F_SETFL, fcntl( _sockfd, F_GETFL, 0 ) | O_NONBLOCK );
+    mbedtls_ssl_conf_authmode( &conf, MBEDTLS_SSL_VERIFY_NONE ); //insecure!
+    mbedtls_ssl_conf_rng( &conf, mbedtls_ctr_drbg_random, &ctr_drbg );
 
-    uint32_t ip_addr = ip;
-    struct sockaddr_in serveraddr;
-    memset((char *) &serveraddr, 0, sizeof(serveraddr));
-    serveraddr.sin_family = AF_INET;
-    memcpy((void *)&serveraddr.sin_addr.s_addr, (const void *)(&ip_addr), 4);
-    serveraddr.sin_port = htons(port);
-
-    int res = lwip_connect(_sockfd, (struct sockaddr*)&serveraddr, sizeof(serveraddr));
-
-    if (res < 0 && errno != EINPROGRESS) 
+    if( ( res = mbedtls_ssl_set_hostname( &ssl, _host )) != 0 )
     {
-        log_e("fd %d lwip_connect() errno: %d, \"%s\"", _sockfd, errno, strerror(errno));
+        print_error(res);
+        log_e( "fd %d mbedtls_ssl_set_hostname() failed %d", _sockfd, res);
         return -1;
     }
 
-    while (true)
+    if ((res = mbedtls_ssl_setup(&ssl, &conf)) != 0) 
     {
-        res = socketReady();
-        if(res > 0)
-        {
-            return _sockfd;
-        }
-        else if(res==0)
-        {
-            if(millis() - start > timeout)
-            {
-                log_e("fd %d connection timeout", _sockfd);
-                return -1;
-            }
-        }
-        else //error
-        {
-            return -1;
-        }
-
-        // log_v("fd %d waiting for connection (sleeping 100ms)", _sockfd);
-        delay(100);
+        print_error(res);
+        log_e( "fd %d mbedtls_ssl_setup() failed %d", _sockfd, res);
+        return -1;
     }
 
-    return -1;
-}
+    mbedtls_ssl_set_bio(&ssl, &server_fd.fd, mbedtls_net_send, mbedtls_net_recv, NULL );
 
-int TLSClient::connect(const char *host, uint16_t port)
-{
-    if(_sockfd > -1)
-        stop();
-
-    if(host==NULL)
+    log_d("fd %d starting handshake", _sockfd);
+    res = mbedtls_ssl_handshake(&ssl);
+    if(res == 0)
     {
-        log_e("host is null");
-        return 0;
+        return 1;
     }
-
-    if(strlen(host)+1 > sizeof(_host))
+    else if (res != MBEDTLS_ERR_SSL_WANT_READ && res != MBEDTLS_ERR_SSL_WANT_WRITE) 
     {
-        log_e("host len > %d", sizeof(_host));
-        return 0;
+        print_error(res);
+        log_e( "fd %d mbedtls_ssl_handshake() failed %d", _sockfd, res);
+        return -1;
     }
     
-    IPAddress srv((uint32_t)0);
-    if(!WiFiGenericClass::hostByName(host, srv)){
-        return 0;
-    }
-
-    strncpy(_host, host, sizeof(_host));
-    return connect(srv, port);
+    return 1;
 }
 
-// void my_debug(void *ctx, int level, const char *file, int line, const char *str)
-// {
-//     const char *p, *basename;
-//     (void) ctx;
-
-//     /* Extract basename from file */
-//     for(p = basename = file; *p != '\0'; p++) {
-//         if(*p == '/' || *p == '\\') {
-//             basename = p + 1;
-//         }
-//     }
-
-//     mbedtls_printf("%s:%04d: |%d| %s", basename, line, level, str);
-// }
-
-int TLSClient::connect(IPAddress ip, uint16_t port)
+int TLSClient::handshakeComplete()
 {
+    if(_status != TLSCLIENT_HANDSHAKE_INPROGRESS)
+        return -1;
+
+    int res = -1;
+    res = mbedtls_ssl_handshake(&ssl);
+    if(res == 0)
+    {
+        log_d("fd %d handshake complete, tls ready %dms", _sockfd, millis()-_connstarted);
+        return 1;
+    }
+    else if (res != MBEDTLS_ERR_SSL_WANT_READ && res != MBEDTLS_ERR_SSL_WANT_WRITE) 
+    {
+        print_error(res);
+        log_e( "fd %d mbedtls_ssl_handshake() failed %d", _sockfd, res);
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+void my_debug(void *ctx, int level, const char *file, int line, const char *str)
+{
+    const char *p, *basename;
+    (void) ctx;
+
+    //Extract basename from file
+    for(p = basename = file; *p != '\0'; p++) {
+        if(*p == '/' || *p == '\\') {
+            basename = p + 1;
+        }
+    }
+
+    mbedtls_printf("%s:%04d: |%d| %s", basename, line, level, str);
+}
+*/
+
+int TLSClient::connectAsync(IPAddress ip, uint16_t port)
+{
+    
     if(_sockfd > -1)
         stop();
+
+    _connstarted = millis();
+    _peek = -1;
 
     _hostIP = ip;
     _port = port;
-
     if(_host[0]=='\0')
         strncpy(_host, _hostIP.toString().c_str(), sizeof(_host));
 
     log_d("starting tls connection to %s:%d", _host, _port);
-
-    if(_timeout < 1000)
-    {
-        log_w("min timeout 1000ms");
-        _timeout = 1000;
-    }
-
-    uint32_t start = millis();
-
+    
     mbedtls_net_init( &server_fd );
     mbedtls_ssl_init( &ssl );
     mbedtls_ssl_config_init( &conf );
     mbedtls_ctr_drbg_init( &ctr_drbg );
 
-    
 	// mbedtls_ssl_conf_dbg(&conf, my_debug, NULL);
     // mbedtls_debug_set_threshold(5);
 
-    int res = 0;
+    int res = -1;
     const char* pers = "esp32_tls";
     mbedtls_entropy_init( &entropy );
     if( ( res = mbedtls_ctr_drbg_seed( &ctr_drbg, mbedtls_entropy_func, &entropy, (const unsigned char *) pers, strlen( pers ) ) ) != 0 )
@@ -220,73 +247,86 @@ int TLSClient::connect(IPAddress ip, uint16_t port)
         stop();
         return 0;
     }
-    
-    if( (res = timedConnect(ip, port, _timeout)) < 0)
-    {
-        stop();
-        return 0;
-    }
-    int sockfd = res;
-    server_fd.fd = res;
 
-    log_d("fd %d socket connected %dms", sockfd, millis()-start);
-
-    if( ( res = mbedtls_ssl_config_defaults( &conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT ) ) != 0 )
+    _sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (_sockfd < 0) 
     {
-        print_error(res);
-        log_e( "fd %d mbedtls_ssl_config_defaults() failed %d", sockfd, res);
-        stop();
+        log_e("failed to create socket errno %d", errno);
         return 0;
     }
 
-    mbedtls_ssl_conf_authmode( &conf, MBEDTLS_SSL_VERIFY_NONE ); //insecure!
+    fcntl( _sockfd, F_SETFL, fcntl( _sockfd, F_GETFL, 0 ) | O_NONBLOCK );
+    uint32_t ip_addr = ip;
+    struct sockaddr_in serveraddr;
+    memset((char *) &serveraddr, 0, sizeof(serveraddr));
+    serveraddr.sin_family = AF_INET;
+    memcpy((void *)&serveraddr.sin_addr.s_addr, (const void *)(&ip_addr), 4);
+    serveraddr.sin_port = htons(port);
 
-    mbedtls_ssl_conf_rng( &conf, mbedtls_ctr_drbg_random, &ctr_drbg );
-
-    if( ( res = mbedtls_ssl_set_hostname( &ssl, _host )) != 0 )
+    res = lwip_connect(_sockfd, (struct sockaddr*) &serveraddr, sizeof(serveraddr));
+    if (res < 0 && errno != EINPROGRESS) 
     {
-        print_error(res);
-        log_e( "fd %d mbedtls_ssl_set_hostname() failed %d", sockfd, res);
-        stop();
+        log_e("fd %d lwip_connect() errno: %d, \"%s\"", _sockfd, errno, strerror(errno));
         return 0;
     }
 
-    if ((res = mbedtls_ssl_setup(&ssl, &conf)) != 0) 
-    {
-        print_error(res);
-        log_e( "fd %d mbedtls_ssl_setup() failed %d", sockfd, res);
-        stop();
-        return 0;
-    }
-
-    mbedtls_ssl_set_bio(&ssl, &server_fd.fd, mbedtls_net_send, mbedtls_net_recv, NULL );
-
-    log_d("fd %d performing handshake", sockfd);
-    while ((res = mbedtls_ssl_handshake(&ssl)) != 0) 
-    {
-        if (res != MBEDTLS_ERR_SSL_WANT_READ && res != MBEDTLS_ERR_SSL_WANT_WRITE) 
-        {
-            print_error(res);
-            log_e( "fd %d mbedtls_ssl_handshake() failed %d", sockfd, res);
-            stop();
-            return 0;
-        }
-
-        if( millis()-start > _timeout)
-        {
-            log_e("fd %d mbedtls_ssl_handshake() timeout", sockfd);
-            stop();
-            return 0;
-        }
-            
-        vTaskDelay(2); //
-    }
-
-    _sockfd = sockfd;
-    _peek = -1;
-    log_d("fd %d tls tunnel ready %dms", sockfd, millis()-start);
-
+    _status = TLSCLIENT_CONNECTING;
+    server_fd.fd = _sockfd;
     return 1;
+}
+
+int TLSClient::connectAsync(const char *host, uint16_t port)
+{
+    if(host==NULL)
+    {
+        log_e("cant connect to null host!");
+        return 0;
+    }
+
+    IPAddress srv((uint32_t)0);
+    if(!WiFiGenericClass::hostByName(host, srv)){
+        return 0;
+    }
+
+    strncpy(_host, host, sizeof(_host));
+    return connectAsync(srv, port);
+}
+
+int TLSClient::connect(IPAddress ip, uint16_t port)
+{
+    if(!connectAsync(ip, port))
+        return 0;
+    
+    while (status() != TLSCLIENT_HANDSHAKE_COMPLETE && status() != TLSCLIENT_DISCONNECTED)
+    {   
+        if(millis() - _connstarted > _timeout)
+        {
+            log_e("fd %d connection timeout", _sockfd);
+            stop();
+            return 0;
+        }
+
+        delay(10);
+    }
+    
+    return status()==TLSCLIENT_HANDSHAKE_COMPLETE;
+}
+
+int TLSClient::connect(const char *host, uint16_t port)
+{
+    if(host==NULL)
+    {
+        log_e("cant connect to null host!");
+        return 0;
+    }
+
+    IPAddress srv((uint32_t)0);
+    if(!WiFiGenericClass::hostByName(host, srv)){
+        return 0;
+    }
+
+    strncpy(_host, host, sizeof(_host));
+    return connect(srv, port);
 }
 
 size_t TLSClient::write(uint8_t b)
@@ -296,7 +336,7 @@ size_t TLSClient::write(uint8_t b)
 
 size_t TLSClient::write(const uint8_t *buf, size_t size)
 {
-    if(_sockfd < 0)
+    if(status() != TLSCLIENT_HANDSHAKE_COMPLETE)
         return -1;
 
     if(!size)
@@ -306,7 +346,7 @@ size_t TLSClient::write(const uint8_t *buf, size_t size)
     int res = -1;
     while ((res = mbedtls_ssl_write(&ssl, buf, size)) <= 0) 
     {
-        if (res != MBEDTLS_ERR_SSL_WANT_READ && res != MBEDTLS_ERR_SSL_WANT_WRITE && res < 0) 
+        if (res < 0 && res != MBEDTLS_ERR_SSL_WANT_READ && res != MBEDTLS_ERR_SSL_WANT_WRITE) 
         {
             print_error(res);
             log_e("fd %d mbedtls_ssl_write() failed %d", _sockfd, res); //
@@ -316,13 +356,12 @@ size_t TLSClient::write(const uint8_t *buf, size_t size)
 
         if(millis()-start > _timeout) 
         {
-            log_e("fd %d mbedtls_ssl_write() timeout", _sockfd);
-            stop();
+            log_w("fd %d mbedtls_ssl_write() %d aborting due to timeout", _sockfd, res);
             return -1;
         }
         
-        // log_v("fd %d mbedtls_ssl_write() %d (trying again in 100ms)", _sockfd, res);
-        delay(100);
+        // log_v("fd %d mbedtls_ssl_write() %d, trying again in 10ms", _sockfd, res);
+        delay(10);
     }
 
     return res;
@@ -330,7 +369,7 @@ size_t TLSClient::write(const uint8_t *buf, size_t size)
 
 int TLSClient::available()
 {
-    if(_sockfd < 0)
+    if(status() != TLSCLIENT_HANDSHAKE_COMPLETE)
         return 0;
 
     /**
@@ -377,7 +416,7 @@ int TLSClient::read()
 int TLSClient::read(uint8_t *buf, size_t size)
 {
 
-    if(_sockfd < 0)
+    if(status() != TLSCLIENT_HANDSHAKE_COMPLETE)
         return -1;
 
     if(!size)
@@ -399,7 +438,7 @@ int TLSClient::read(uint8_t *buf, size_t size)
     int res = -1;
     while ((res = mbedtls_ssl_read(&ssl, buf, size)) <= 0) 
     {
-        if (res != MBEDTLS_ERR_SSL_WANT_READ && res != MBEDTLS_ERR_SSL_WANT_WRITE && res < 0) 
+        if (res < 0 && res != MBEDTLS_ERR_SSL_WANT_READ && res != MBEDTLS_ERR_SSL_WANT_WRITE) 
         {
             print_error(res);
             log_e("fd %d mbedtls_ssl_read() failed %d", _sockfd, res);
@@ -412,13 +451,12 @@ int TLSClient::read(uint8_t *buf, size_t size)
 
         if(millis()-start > _timeout) 
         {
-            log_e("fd %d mbedtls_ssl_read() timeout", _sockfd);
-            stop();
+            log_w("fd %d mbedtls_ssl_read() %d aborting due to timeout", _sockfd, res);
             return -1;
         }
         
-        // log_v("fd %d mbedtls_ssl_read() %d (trying again in 100ms)", _sockfd, res);
-        delay(100);
+        // log_v("fd %d mbedtls_ssl_read() %d, trying again in 10ms", _sockfd, res);
+        delay(10);
     }
 
     return res+hasPeek;
@@ -445,34 +483,27 @@ void TLSClient::flush()
 
 void TLSClient::stop()
 {
-    log_d("fd %d cleaning tls session", _sockfd);
-    if(_sockfd)
+    if(_sockfd > -1)
+    {
+        log_d("fd %d cleaning tls session", _sockfd);
         close(_sockfd);
-    _sockfd = -1;
-    _host[0] = '\0';
-    _peek = -1;
-    mbedtls_net_free( &server_fd );
-    mbedtls_ssl_free( &ssl );
-    mbedtls_ssl_config_free( &conf );
-    mbedtls_ctr_drbg_free( &ctr_drbg );
-    mbedtls_entropy_free( &entropy );
+        _sockfd = -1;
+        _host[0] = '\0';
+        _peek = -1;
+        _connstarted = 0;
+        mbedtls_net_free( &server_fd );
+        mbedtls_ssl_free( &ssl );
+        mbedtls_ssl_config_free( &conf );
+        mbedtls_ctr_drbg_free( &ctr_drbg );
+        mbedtls_entropy_free( &entropy );
+    }
+
+    _status = TLSCLIENT_DISCONNECTED;
 }
 
 uint8_t TLSClient::connected()
-{
-    if(_sockfd < 0)
-        return 0;
-
-    int res = mbedtls_ssl_read(&ssl, NULL, 0);    
-    if (res < 0 && res != MBEDTLS_ERR_SSL_WANT_READ && res != MBEDTLS_ERR_SSL_WANT_WRITE) 
-    {
-        print_error(res);
-        log_e("fd %d mbedtls_ssl_read() failed %d", _sockfd, res);
-        stop();
-        return 0;
-    }
-    
-    return 1;
+{   
+    return status() == TLSCLIENT_HANDSHAKE_COMPLETE;
 }
 
 

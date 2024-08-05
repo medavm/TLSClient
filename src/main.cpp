@@ -18,7 +18,7 @@ void setup()
 	delay(3000);
 
 	WiFi.mode(WIFI_STA); // Optional
-	WiFi.begin("NET_2", "senha123");
+	WiFi.begin("NET", "senha123");
 	Serial.println("\nConnecting");
 
 	while (WiFi.status() != WL_CONNECTED)
@@ -33,11 +33,6 @@ void setup()
 
 	delay(1000);
 
-	Serial.println("Connecting...");
-	uint32_t start = millis();
-
-	int res = _tls.connect("gate1.alagoa.top", 443);
-	delay(500);
 }
 
 void loop()
@@ -51,20 +46,25 @@ void loop()
 
 
 	static uint32_t last = millis();
-	if(millis()-last > 1000l*3)
+	if(millis()-last > 1000l*5)
 	{
 		if(_tls.connected())
 		{
-			Serial.println("connected");
+			const char text[] = "this is a test";
+			_tls.write((uint8_t*)text, strlen(text)); 
+			log_d("sent message");
 		}
 		else
 		{
-			Serial.println("not connected");
+			int res = _tls.connectAsync("192.168.1.145", 9000);
+			log_d("connectAsync() res %d", res);
 		}
 
 		last = millis();
 	}
 
+
+	_tls.status();
 
 }
 
