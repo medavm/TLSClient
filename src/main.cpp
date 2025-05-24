@@ -7,6 +7,10 @@
 #include <WiFi.h>
 #include <TLSClient.h>
 
+
+#define TEST_SERV_ADDR "192.168.1.141"
+#define TEST_SERV_PORT 9000
+
 TLSClient _tls;
 
 void setup()
@@ -56,8 +60,8 @@ void loop()
 		}
 		else
 		{
-			int res = _tls.connectAsync("192.168.1.145", 9000);
-			log_d("connectAsync() res %d", res);
+			int res = _tls.connect(TEST_SERV_ADDR, TEST_SERV_PORT);
+			log_d("connect() res %d", res);
 		}
 
 		last = millis();

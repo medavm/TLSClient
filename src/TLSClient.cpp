@@ -3,8 +3,7 @@
 #include <TLSClient.h>
 #include <WiFi.h>
 #include <lwip/sockets.h>
-#include <lwip/netdb.h>
-#include <mbedtls/debug.h>
+// #include <mbedtls/debug.h>
 
 
 static int _print_error(int err, const char * function, int line)
@@ -24,7 +23,6 @@ static int _print_error(int err, const char * function, int line)
 
 #define print_error(e) _print_error(e, __FUNCTION__, __LINE__)
 
-
 TLSClient::TLSClient()
 {
     setTimeout(TLSCLIENT_TIMEOUT_DEFAULT);
@@ -39,7 +37,7 @@ TLSClient::~TLSClient()
 
 int TLSClient::status()
 {
-    if(_status == TLSCLIENT_CONNECTING) //test if connected
+    if(_status == TLSCLIENT_CONNECTING) //connected?
     {
         int res = socketReady();
         if(res > 0) 
@@ -57,7 +55,7 @@ int TLSClient::status()
             stop();
     }
 
-    if(_status == TLSCLIENT_HANDSHAKE_INPROGRESS) //test if handshake complete
+    if(_status == TLSCLIENT_HANDSHAKE_INPROGRESS) //
     {
         int res = handshakeComplete();
         if(res > 0)
@@ -66,7 +64,7 @@ int TLSClient::status()
             stop();
     }
 
-    if(_status == TLSCLIENT_HANDSHAKE_COMPLETE) //test is still alive
+    if(_status == TLSCLIENT_HANDSHAKE_COMPLETE) //detect connection drop?
     {
         int res = mbedtls_ssl_read(&ssl, NULL, 0);    
         if (res < 0 && res != MBEDTLS_ERR_SSL_WANT_READ && res != MBEDTLS_ERR_SSL_WANT_WRITE) 
@@ -79,7 +77,6 @@ int TLSClient::status()
 
     return _status;
 }
-
 
 int TLSClient::socketReady()
 {
